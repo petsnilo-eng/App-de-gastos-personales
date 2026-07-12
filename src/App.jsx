@@ -120,6 +120,53 @@ function useFinanzas() {
   return { ...datos, cargando, error, agregar, borrar, recargar: cargar, limpiarError: () => setError(null) };
 }
 
+// ─── Estado de la conexión con Supabase ────────────────────────────────────
+// Lee una fila de `categorias` y traduce lo que pasa a algo accionable.
+function useConexion() {
+  const [estado, setEstado] = useState({ status: 'verificando', ms: null, detalle: null });
+
+  const probar = useCallback(async () => {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+      setEstado({ status: 'error', ms: null, detalle: 'Faltan VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY' });
+      return;
+    }
+    setEstado((e) => ({ ...e, status: 'verificando' }));
+    const t0 = performance.now();
+    try {
+      const res = await fetch(`${SUPABASE_URL}/rest/v1/categorias?select=id&limit=1`, {
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+      });
+      const ms = Math.round(performance.now() - t0);
+
+      if (!res.ok) {
+        const cuerpo = await res.json().catch(() => ({}));
+        const porCodigo = {
+          401: 'La anon key no es válida',
+          403: 'Sin permisos: ¿quedó la RLS activa?',
+          404: 'No existe la tabla: ¿corriste schema.sql?',
+        };
+        setEstado({ status: 'error', ms, detalle: porCodigo[res.status] || cuerpo.message || `Error ${res.status}` });
+        return;
+      }
+
+      // Con RLS activa y sin policies, Postgres devuelve 200 y una lista vacía.
+      // O sea: "conectado" pero sin ver nada. Hay que distinguirlo.
+      const filas = await res.json();
+      if (!Array.isArray(filas) || filas.length === 0) {
+        setEstado({ status: 'aviso', ms, detalle: 'Conecta, pero no hay categorías: ¿RLS activa o falta correr schema.sql?' });
+        return;
+      }
+
+      setEstado({ status: 'ok', ms, detalle: null });
+    } catch {
+      setEstado({ status: 'error', ms: null, detalle: 'No se llega al servidor: revisá la URL o la red' });
+    }
+  }, []);
+
+  useEffect(() => { probar(); }, [probar]);
+  return { ...estado, probar };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 
 const C = {
@@ -147,6 +194,24 @@ const PIE_COLORS = ['#2FBF71', '#5EA8FF', '#E0A93B', '#F0475F', '#A78BFA', '#38B
 const DOLAR_FALLBACK = 1510;
 
 function fmt(n) { return Math.round(n).toLocaleString('es-AR'); }
+
+// Acepta lo que escribe la gente de verdad: "1.400.000", "1400000", "1.400,50",
+// "1400.50". Devuelve NaN si no hay un número adentro.
+function parseMonto(v) {
+  if (typeof v === 'number') return v;
+  if (!v) return NaN;
+  let s = String(v).trim().replace(/\s/g, '').replace(/[^\d.,]/g, '');
+  if (!/\d/.test(s)) return NaN;   // no quedó ningún dígito: "abc", "$$$", etc.
+  if (s.includes(',')) {
+    s = s.replace(/\./g, '').replace(',', '.');   // coma = decimal, puntos = miles
+  } else {
+    const partes = s.split('.');
+    // "1.400.000" o "1.400" → puntos de miles.  "1400.50" → punto decimal.
+    if (partes.length > 2 || (partes.length === 2 && partes[1].length === 3)) s = partes.join('');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
 function toARS(monto, moneda, dolar) {
   const n = Number(monto) || 0;
   return moneda === 'USD' ? n * dolar : n;
@@ -202,6 +267,7 @@ function Finanzas() {
   const [anio, setAnio] = useState(hoy.getFullYear());
   const fin = useFinanzas();
   const dolar = useDolar();
+  const conexion = useConexion();
 
   const shiftMonth = (d) => {
     let m = mes + d, y = anio;
@@ -211,7 +277,7 @@ function Finanzas() {
 
   return (
     <div className="app-frame">
-      <Header tab={tab} mes={mes} anio={anio} shiftMonth={shiftMonth} />
+      <Header tab={tab} mes={mes} anio={anio} shiftMonth={shiftMonth} conexion={conexion} />
 
       {fin.error && (
         <div style={{ background: C.coralSoft, borderBottom: `1px solid ${C.coralBorder}`, padding: '8px 18px', display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: C.coral }}>
@@ -238,17 +304,65 @@ function Finanzas() {
   );
 }
 
-function Header({ tab, mes, anio, shiftMonth }) {
+function Header({ tab, mes, anio, shiftMonth, conexion }) {
   const titles = { dashboard: 'Resumen', ingresos: 'Ingresos', egresos: 'Egresos', ahorros: 'Ahorros' };
   return (
     <div style={{ padding: '16px 18px 12px', paddingTop: 'calc(16px + env(safe-area-inset-top))', borderBottom: `1px solid ${C.border}`, background: 'rgba(11,15,20,0.9)' }}>
       <p style={{ fontSize: 11, letterSpacing: '0.2em', color: C.mint, textTransform: 'uppercase', margin: 0, fontFamily: 'monospace' }}>Finanzas de Walter &amp; Olin</p>
       <h1 style={{ fontSize: 24, margin: '2px 0 0', fontWeight: 600 }}>{titles[tab]}</h1>
+      {tab === 'dashboard' && <EstadoConexion conexion={conexion} />}
       {tab !== 'ahorros' && (
         <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: '6px 8px' }}>
           <button onClick={() => shiftMonth(-1)} style={btnGhost}><ChevronLeft size={18} /></button>
           <span style={{ fontFamily: 'monospace', fontSize: 13 }}>{MESES[mes - 1]} {anio}</span>
           <button onClick={() => shiftMonth(1)} style={btnGhost}><ChevronRight size={18} /></button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EstadoConexion({ conexion }) {
+  const [abierto, setAbierto] = useState(false);
+  const { status, ms, detalle, probar } = conexion;
+
+  const estilos = {
+    verificando: { color: C.textMute, punto: C.textMute, texto: 'Verificando conexión…' },
+    ok:          { color: C.mint,     punto: C.mint,     texto: `Supabase conectada · ${ms} ms` },
+    aviso:       { color: C.gold,     punto: C.gold,     texto: 'Conectada, pero sin datos' },
+    error:       { color: C.coral,    punto: C.coral,    texto: 'Sin conexión con Supabase' },
+  }[status];
+
+  const alTocar = () => {
+    if (detalle) setAbierto((a) => !a);
+    else probar();
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button
+        onClick={alTocar}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 7,
+          background: C.card, border: `1px solid ${C.border}`, borderRadius: 99,
+          padding: '5px 11px', cursor: 'pointer', color: estilos.color,
+          fontSize: 11.5, fontFamily: 'monospace',
+        }}
+      >
+        <span style={{
+          width: 7, height: 7, borderRadius: 99, background: estilos.punto, flexShrink: 0,
+          animation: status === 'verificando' ? 'latido 1s ease-in-out infinite' : 'none',
+        }} />
+        {estilos.texto}
+        {detalle && <ChevronDown size={12} style={{ transform: abierto ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }} />}
+      </button>
+
+      {abierto && detalle && (
+        <div style={{ marginTop: 6, padding: '8px 10px', background: C.card, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+          <p style={{ margin: 0, fontSize: 11.5, color: C.textDim, lineHeight: 1.5 }}>{detalle}</p>
+          <button onClick={probar} style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0, color: C.mint, fontSize: 11.5, cursor: 'pointer' }}>
+            <RefreshCw size={11} /> Reintentar
+          </button>
         </div>
       )}
     </div>
@@ -349,29 +463,48 @@ function Dashboard({ mes, anio, fin, dolar }) {
         </div>
       </div>
 
-      {porCategoria.length > 0 && (
-        <div style={card}>
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 10px' }}>Egresos por categoría</h3>
-          <div style={{ height: 190 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={porCategoria} dataKey="value" nameKey="name" innerRadius={42} outerRadius={70} paddingAngle={2}>
-                  {porCategoria.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="none" />)}
-                </Pie>
-                <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12 }} formatter={(v) => `$${fmt(v)}`} />
-              </PieChart>
-            </ResponsiveContainer>
+      <div style={card}>
+        <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 10px' }}>Egresos por categoría</h3>
+
+        {porCategoria.length === 0 ? (
+          // Antes esta tarjeta desaparecía sin más, y no había forma de saber si
+          // no había datos o si algo se había roto.
+          <div style={{ padding: '28px 8px', textAlign: 'center' }}>
+            <PiggyBank size={22} color={C.textMute} style={{ marginBottom: 8 }} />
+            <p style={{ fontSize: 13, color: C.textDim, margin: 0 }}>
+              No hay egresos en {MESES[mes - 1].toLowerCase()} de {anio}.
+            </p>
+            <p style={{ fontSize: 11.5, color: C.textMute, margin: '4px 0 0', lineHeight: 1.5 }}>
+              Cargalos desde la solapa Egresos, o cambiá de mes con las flechas de arriba.
+            </p>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 8 }}>
-            {porCategoria.map((c, i) => (
-              <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.textDim }}>
-                <span style={{ width: 8, height: 8, borderRadius: 99, background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+        ) : (
+          <>
+            <div style={{ height: 190 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={porCategoria} dataKey="value" nameKey="name" innerRadius={42} outerRadius={70} paddingAngle={2}>
+                    {porCategoria.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="none" />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12 }} formatter={(v) => `$${fmt(v)}`} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 8 }}>
+              {porCategoria.map((c, i) => (
+                <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 99, background: PIE_COLORS[i % PIE_COLORS.length], flexShrink: 0 }} />
+                  <span style={{ color: C.textDim, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{c.name}</span>
+                  <span style={{ fontFamily: 'monospace', color: C.textDim }}>${fmt(c.value)}</span>
+                  <span style={{ fontFamily: 'monospace', color: C.textMute, minWidth: 34, textAlign: 'right' }}>
+                    {Math.round((c.value / totalOut) * 100)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -397,6 +530,7 @@ function DolarNota({ dolar }) {
 function Ingresos({ mes, anio, fin, dolar }) {
   const [show, setShow] = useState(false);
   const [guardando, setGuardando] = useState(false);
+  const [aviso, setAviso] = useState(null);
   const [form, setForm] = useState({ tipo: 'salario', nombre: '', monto: '', moneda: 'ARS', anual: false });
 
   const visibles = fin.ingresos.filter((r) => r.anio === anio && (r.anual || r.mes === mes));
@@ -404,9 +538,12 @@ function Ingresos({ mes, anio, fin, dolar }) {
   const totalUsd = visibles.reduce((a, r) => a + (r.moneda === 'USD' ? Number(r.monto) : 0), 0);
 
   const add = async () => {
-    if (!form.nombre || !form.monto) return;
+    const monto = parseMonto(form.monto);
+    if (!form.nombre.trim()) return setAviso('Poné un nombre.');
+    if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
+    setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('ingresos', { ...form, monto: Number(form.monto), mes, anio });
+    const ok = await fin.agregar('ingresos', { ...form, nombre: form.nombre.trim(), monto, mes, anio });
     setGuardando(false);
     if (ok) { setForm({ tipo: 'salario', nombre: '', monto: '', moneda: 'ARS', anual: false }); setShow(false); }
   };
@@ -436,7 +573,7 @@ function Ingresos({ mes, anio, fin, dolar }) {
           </div>
           <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder="Ej: Sueldo, Alquiler cobrado…" />
           <div style={{ display: 'flex', gap: 6 }}>
-            <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="number" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
+            <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
             <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
               {['ARS', 'USD'].map((m) => (
                 <button key={m} onClick={() => setForm((f) => ({ ...f, moneda: m }))} style={{ padding: '0 10px', fontSize: 11, fontFamily: 'monospace', border: 'none', background: form.moneda === m ? C.mint : 'transparent', color: form.moneda === m ? '#0B0F14' : C.textMute, cursor: 'pointer' }}>{m === 'ARS' ? '$' : 'US$'}</button>
@@ -446,6 +583,7 @@ function Ingresos({ mes, anio, fin, dolar }) {
           <label style={{ display: 'flex', gap: 6, fontSize: 11, color: C.textDim, alignItems: 'center' }}>
             <input type="checkbox" checked={form.anual} onChange={(e) => setForm((f) => ({ ...f, anual: e.target.checked }))} /> Se repite todo el año
           </label>
+          {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={() => setShow(false)} style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 8, padding: '9px 0', fontSize: 13, cursor: 'pointer' }}>Cancelar</button>
             <button onClick={add} disabled={guardando} style={{ flex: 2, background: C.mint, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '9px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
@@ -539,11 +677,15 @@ function Egresos({ mes, anio, fin, dolar }) {
 function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
   const [form, setForm] = useState({ nombre: '', monto: '', moneda: 'ARS', anual: false });
   const [guardando, setGuardando] = useState(false);
+  const [aviso, setAviso] = useState(null);
 
   const add = async () => {
-    if (!form.nombre || !form.monto) return;
+    const monto = parseMonto(form.monto);
+    if (!form.nombre.trim()) return setAviso('Poné un nombre.');
+    if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
+    setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('egresos', { catId: cat.id, ...form, monto: Number(form.monto), mes, anio });
+    const ok = await fin.agregar('egresos', { catId: cat.id, ...form, nombre: form.nombre.trim(), monto, mes, anio });
     setGuardando(false);
     if (ok) setForm({ nombre: '', monto: '', moneda: 'ARS', anual: false });
   };
@@ -562,7 +704,7 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
           <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder="Ej: Luz, Nafta…" />
             <div style={{ display: 'flex', gap: 6 }}>
-              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="number" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
+              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
               <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
                 {['ARS', 'USD'].map((m) => (
                   <button key={m} onClick={() => setForm((f) => ({ ...f, moneda: m }))} style={{ padding: '0 10px', fontSize: 11, fontFamily: 'monospace', border: 'none', background: form.moneda === m ? C.coral : 'transparent', color: form.moneda === m ? '#0B0F14' : C.textMute, cursor: 'pointer' }}>{m === 'ARS' ? '$' : 'US$'}</button>
@@ -572,6 +714,7 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
             <label style={{ display: 'flex', gap: 6, fontSize: 11, color: C.textDim, alignItems: 'center' }}>
               <input type="checkbox" checked={form.anual} onChange={(e) => setForm((f) => ({ ...f, anual: e.target.checked }))} /> Se repite todo el año
             </label>
+            {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
             <button onClick={add} disabled={guardando} style={{ background: C.coral, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
               {guardando ? 'Guardando…' : 'Agregar gasto'}
             </button>
@@ -599,11 +742,16 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
 function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
   const [form, setForm] = useState({ nombre: '', total: '', moneda: 'ARS', cuotas: 1 });
   const [guardando, setGuardando] = useState(false);
+  const [aviso, setAviso] = useState(null);
 
   const add = async () => {
-    if (!form.nombre || !form.total) return;
+    const monto = parseMonto(form.total);
+    const cuotas = Math.min(Math.max(parseInt(form.cuotas, 10) || 1, 1), 48);
+    if (!form.nombre.trim()) return setAviso('Poné un nombre.');
+    if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
+    setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('tarjeta', { nombre: form.nombre, total: Number(form.total), moneda: form.moneda, cuotas: Number(form.cuotas) || 1, desdeMes: mes, desdeAnio: anio });
+    const ok = await fin.agregar('tarjeta', { nombre: form.nombre.trim(), total: monto, moneda: form.moneda, cuotas, desdeMes: mes, desdeAnio: anio });
     setGuardando(false);
     if (ok) setForm({ nombre: '', total: '', moneda: 'ARS', cuotas: 1 });
   };
@@ -622,7 +770,7 @@ function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
           <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
             <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder="Ej: Notebook, Viaje…" />
             <div style={{ display: 'flex', gap: 6 }}>
-              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="number" value={form.total} onChange={(e) => setForm((f) => ({ ...f, total: e.target.value }))} placeholder="Monto total" />
+              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.total} onChange={(e) => setForm((f) => ({ ...f, total: e.target.value }))} placeholder="Monto total" />
               <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
                 {['ARS', 'USD'].map((m) => (
                   <button key={m} onClick={() => setForm((f) => ({ ...f, moneda: m }))} style={{ padding: '0 10px', fontSize: 11, fontFamily: 'monospace', border: 'none', background: form.moneda === m ? C.gold : 'transparent', color: form.moneda === m ? '#0B0F14' : C.textMute, cursor: 'pointer' }}>{m === 'ARS' ? '$' : 'US$'}</button>
@@ -630,8 +778,9 @@ function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
               </div>
             </div>
             <label style={{ display: 'flex', gap: 6, fontSize: 11, color: C.textDim, alignItems: 'center' }}>
-              Cuotas <input type="number" min={1} max={48} value={form.cuotas} onChange={(e) => setForm((f) => ({ ...f, cuotas: e.target.value }))} style={{ ...input, width: 50, padding: '4px 8px', fontFamily: 'monospace' }} />
+              Cuotas <input type="text" inputMode="numeric" value={form.cuotas} onChange={(e) => setForm((f) => ({ ...f, cuotas: e.target.value.replace(/\D/g, '') }))} style={{ ...input, width: 50, padding: '4px 8px', fontFamily: 'monospace' }} />
             </label>
+            {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
             <button onClick={add} disabled={guardando} style={{ background: C.gold, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
               {guardando ? 'Guardando…' : 'Agregar gasto'}
             </button>
@@ -669,21 +818,21 @@ function Ahorros({ fin, dolar }) {
         render={(it) => `${it.moneda === 'USD' ? 'US$' : '$'}${fmt(it.monto)}`}
         label={(it) => `Ahorro en ${it.moneda}`}
         fields={['monto', 'moneda']}
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'fisico', nombre: null, monto: Number(v.monto), moneda: v.moneda })}
+        onAdd={(v) => fin.agregar('ahorros', { clase: 'fisico', nombre: null, monto: v.monto, moneda: v.moneda })}
         onRemove={(id) => fin.borrar('ahorros', id)} />
 
       <Section title="Plazos fijos (USD)" icon={Landmark} items={plazos}
         render={(it) => `US$${fmt(it.monto)}`}
         label={(it) => it.nombre}
         fields={['nombre', 'monto']} nombreLabel="Banco"
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'plazo', nombre: v.nombre, monto: Number(v.monto), moneda: 'USD' })}
+        onAdd={(v) => fin.agregar('ahorros', { clase: 'plazo', nombre: v.nombre, monto: v.monto, moneda: 'USD' })}
         onRemove={(id) => fin.borrar('ahorros', id)} />
 
       <Section title="Billeteras digitales" icon={Wallet} items={billeteras}
         render={(it) => `${it.moneda === 'USD' ? 'US$' : '$'}${fmt(it.monto)}`}
         label={(it) => it.nombre}
         fields={['nombre', 'monto', 'moneda']} nombreLabel="Billetera"
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'billetera', nombre: v.nombre, monto: Number(v.monto), moneda: v.moneda })}
+        onAdd={(v) => fin.agregar('ahorros', { clase: 'billetera', nombre: v.nombre, monto: v.monto, moneda: v.moneda })}
         onRemove={(id) => fin.borrar('ahorros', id)} />
     </div>
   );
@@ -692,12 +841,16 @@ function Ahorros({ fin, dolar }) {
 function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, nombreLabel, label }) {
   const [show, setShow] = useState(false);
   const [guardando, setGuardando] = useState(false);
+  const [aviso, setAviso] = useState(null);
   const [form, setForm] = useState({ nombre: '', monto: '', moneda: 'ARS' });
 
   const submit = async () => {
-    if (!form.monto || (fields.includes('nombre') && !form.nombre)) return;
+    const monto = parseMonto(form.monto);
+    if (fields.includes('nombre') && !form.nombre.trim()) return setAviso('Poné un nombre.');
+    if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
+    setAviso(null);
     setGuardando(true);
-    const ok = await onAdd(form);
+    const ok = await onAdd({ ...form, nombre: form.nombre.trim(), monto });
     setGuardando(false);
     if (ok) { setForm({ nombre: '', monto: '', moneda: 'ARS' }); setShow(false); }
   };
@@ -712,7 +865,7 @@ function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, no
         <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
           {fields.includes('nombre') && <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder={nombreLabel || 'Nombre'} />}
           <div style={{ display: 'flex', gap: 6 }}>
-            <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="number" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
+            <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
             {fields.includes('moneda') && (
               <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
                 {['ARS', 'USD'].map((m) => (
@@ -721,6 +874,7 @@ function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, no
               </div>
             )}
           </div>
+          {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
           <button onClick={submit} disabled={guardando} style={{ background: C.mint, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
             {guardando ? 'Guardando…' : 'Guardar'}
           </button>

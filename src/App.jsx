@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { LayoutGrid, TrendingUp, TrendingDown, PiggyBank, ChevronLeft, ChevronRight, Plus, Trash2, ChevronDown, CreditCard, RefreshCw, ArrowUpRight, ArrowDownRight, Wallet, Landmark, Coins, AlertCircle } from 'lucide-react';
+import { Pencil, LayoutGrid, TrendingUp, TrendingDown, PiggyBank, ChevronLeft, ChevronRight, Plus, Trash2, ChevronDown, CreditCard, RefreshCw, ArrowUpRight, ArrowDownRight, Wallet, Landmark, Coins, AlertCircle } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, Tooltip } from 'recharts';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -101,6 +101,20 @@ function useFinanzas() {
     }
   }, []);
 
+  const editar = useCallback(async (clave, id, fila) => {
+    const { tabla, aDB, aApp } = mapa[clave];
+    setError(null);
+    try {
+      const [actualizada] = await sb(tabla, { method: 'PATCH', query: `id=eq.${id}`, body: aDB(fila) });
+      const item = aApp(actualizada);
+      setDatos((d) => ({ ...d, [clave]: d[clave].map((x) => (x.id === id ? item : x)) }));
+      return item;
+    } catch (e) {
+      setError(`No se pudo guardar el cambio: ${e.message}`);
+      return null;
+    }
+  }, []);
+
   const borrar = useCallback(async (clave, id) => {
     const { tabla } = mapa[clave];
     setError(null);
@@ -117,7 +131,7 @@ function useFinanzas() {
     }
   }, [cargar]);
 
-  return { ...datos, cargando, error, agregar, borrar, recargar: cargar, limpiarError: () => setError(null) };
+  return { ...datos, cargando, error, agregar, editar, borrar, recargar: cargar, limpiarError: () => setError(null) };
 }
 
 // ─── Estado de la conexión con Supabase ────────────────────────────────────
@@ -527,25 +541,40 @@ function DolarNota({ dolar }) {
   );
 }
 
+const INGRESO_VACIO = { tipo: 'salario', nombre: '', monto: '', moneda: 'ARS', anual: false };
+
 function Ingresos({ mes, anio, fin, dolar }) {
   const [show, setShow] = useState(false);
+  const [editando, setEditando] = useState(null);   // la fila original, o null si es alta
   const [guardando, setGuardando] = useState(false);
   const [aviso, setAviso] = useState(null);
-  const [form, setForm] = useState({ tipo: 'salario', nombre: '', monto: '', moneda: 'ARS', anual: false });
+  const [form, setForm] = useState(INGRESO_VACIO);
 
   const visibles = fin.ingresos.filter((r) => r.anio === anio && (r.anual || r.mes === mes));
   const total = visibles.reduce((a, r) => a + toARS(r.monto, r.moneda, dolar), 0);
   const totalUsd = visibles.reduce((a, r) => a + (r.moneda === 'USD' ? Number(r.monto) : 0), 0);
 
-  const add = async () => {
+  const cerrar = () => { setShow(false); setEditando(null); setAviso(null); setForm(INGRESO_VACIO); };
+
+  const abrirEdicion = (r) => {
+    setForm({ tipo: r.tipo, nombre: r.nombre, monto: String(r.monto), moneda: r.moneda, anual: r.anual });
+    setEditando(r);
+    setAviso(null);
+    setShow(true);
+  };
+
+  const guardar = async () => {
     const monto = parseMonto(form.monto);
     if (!form.nombre.trim()) return setAviso('Poné un nombre.');
     if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
     setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('ingresos', { ...form, nombre: form.nombre.trim(), monto, mes, anio });
+    // Al editar respetamos el mes original: un ingreso anual puede haberse
+    // cargado en otro mes y no queremos moverlo sin que nos lo pidan.
+    const fila = { ...form, nombre: form.nombre.trim(), monto, mes: editando ? editando.mes : mes, anio: editando ? editando.anio : anio };
+    const ok = editando ? await fin.editar('ingresos', editando.id, fila) : await fin.agregar('ingresos', fila);
     setGuardando(false);
-    if (ok) { setForm({ tipo: 'salario', nombre: '', monto: '', moneda: 'ARS', anual: false }); setShow(false); }
+    if (ok) cerrar();
   };
 
   return (
@@ -565,7 +594,8 @@ function Ingresos({ mes, anio, fin, dolar }) {
           <Plus size={17} /> Agregar ingreso
         </button>
       ) : (
-        <div style={{ ...card, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ ...card, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8, border: `1px solid ${editando ? C.mintBorder : C.border}` }}>
+          {editando && <p style={{ fontSize: 11.5, color: C.mint, margin: 0, fontFamily: 'monospace' }}>Editando: {editando.nombre}</p>}
           <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
             {[['salario', 'Salario'], ['tercero', 'De terceros']].map(([v, l]) => (
               <button key={v} onClick={() => setForm((f) => ({ ...f, tipo: v }))} style={{ flex: 1, padding: '8px 0', fontSize: 12, border: 'none', background: form.tipo === v ? C.mint : 'transparent', color: form.tipo === v ? '#0B0F14' : C.textMute, cursor: 'pointer', fontWeight: form.tipo === v ? 600 : 400 }}>{l}</button>
@@ -585,9 +615,9 @@ function Ingresos({ mes, anio, fin, dolar }) {
           </label>
           {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
           <div style={{ display: 'flex', gap: 6 }}>
-            <button onClick={() => setShow(false)} style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 8, padding: '9px 0', fontSize: 13, cursor: 'pointer' }}>Cancelar</button>
-            <button onClick={add} disabled={guardando} style={{ flex: 2, background: C.mint, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '9px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
-              {guardando ? 'Guardando…' : 'Guardar ingreso'}
+            <button onClick={cerrar} style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 8, padding: '9px 0', fontSize: 13, cursor: 'pointer' }}>Cancelar</button>
+            <button onClick={guardar} disabled={guardando} style={{ flex: 2, background: C.mint, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '9px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
+              {guardando ? 'Guardando…' : editando ? 'Guardar cambios' : 'Guardar ingreso'}
             </button>
           </div>
         </div>
@@ -597,16 +627,17 @@ function Ingresos({ mes, anio, fin, dolar }) {
         {visibles.length === 0 && <p style={{ color: C.textMute, fontSize: 13, textAlign: 'center', padding: '20px 0' }}>No hay ingresos este mes.</p>}
         {visibles.map((r) => (
           <div key={r.id} style={{ ...card, padding: '12px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div>
-              <p style={{ fontSize: 13.5, margin: 0, fontWeight: 500 }}>{r.nombre}</p>
+            <div style={{ minWidth: 0 }}>
+              <p style={{ fontSize: 13.5, margin: 0, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.nombre}</p>
               <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
                 <span style={{ fontSize: 11, color: C.textMute }}>{r.tipo === 'salario' ? 'Salario' : 'Tercero'}</span>
                 {r.anual && <span style={{ fontSize: 11, color: C.gold, display: 'flex', alignItems: 'center', gap: 3 }}><RefreshCw size={9} />anual</span>}
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
               <span style={{ fontFamily: 'monospace', fontSize: 13, color: C.mint }}>{r.moneda === 'USD' ? 'US$' : '$'}{fmt(r.monto)}</span>
-              <button onClick={() => fin.borrar('ingresos', r.id)} style={{ ...btnGhost, padding: 2 }}><Trash2 size={15} /></button>
+              <button onClick={() => abrirEdicion(r)} style={{ ...btnGhost, padding: 2 }} aria-label="Editar"><Pencil size={14} /></button>
+              <button onClick={() => fin.borrar('ingresos', r.id)} style={{ ...btnGhost, padding: 2 }} aria-label="Borrar"><Trash2 size={15} /></button>
             </div>
           </div>
         ))}
@@ -674,20 +705,32 @@ function Egresos({ mes, anio, fin, dolar }) {
   );
 }
 
+const EGRESO_VACIO = { nombre: '', monto: '', moneda: 'ARS', anual: false };
+
 function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
-  const [form, setForm] = useState({ nombre: '', monto: '', moneda: 'ARS', anual: false });
+  const [form, setForm] = useState(EGRESO_VACIO);
+  const [editando, setEditando] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [aviso, setAviso] = useState(null);
 
-  const add = async () => {
+  const limpiar = () => { setForm(EGRESO_VACIO); setEditando(null); setAviso(null); };
+
+  const abrirEdicion = (r) => {
+    setForm({ nombre: r.nombre, monto: String(r.monto), moneda: r.moneda, anual: r.anual });
+    setEditando(r);
+    setAviso(null);
+  };
+
+  const guardar = async () => {
     const monto = parseMonto(form.monto);
     if (!form.nombre.trim()) return setAviso('Poné un nombre.');
     if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
     setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('egresos', { catId: cat.id, ...form, nombre: form.nombre.trim(), monto, mes, anio });
+    const fila = { catId: cat.id, ...form, nombre: form.nombre.trim(), monto, mes: editando ? editando.mes : mes, anio: editando ? editando.anio : anio };
+    const ok = editando ? await fin.editar('egresos', editando.id, fila) : await fin.agregar('egresos', fila);
     setGuardando(false);
-    if (ok) setForm({ nombre: '', monto: '', moneda: 'ARS', anual: false });
+    if (ok) limpiar();
   };
 
   return (
@@ -701,7 +744,8 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
       </button>
       {open && (
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6, border: `1px solid ${editando ? C.coralBorder : 'transparent'}` }}>
+            {editando && <p style={{ fontSize: 11.5, color: C.coral, margin: 0, fontFamily: 'monospace' }}>Editando: {editando.nombre}</p>}
             <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder="Ej: Luz, Nafta…" />
             <div style={{ display: 'flex', gap: 6 }}>
               <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
@@ -715,16 +759,24 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
               <input type="checkbox" checked={form.anual} onChange={(e) => setForm((f) => ({ ...f, anual: e.target.checked }))} /> Se repite todo el año
             </label>
             {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
-            <button onClick={add} disabled={guardando} style={{ background: C.coral, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
-              {guardando ? 'Guardando…' : 'Agregar gasto'}
-            </button>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {editando && (
+                <button onClick={limpiar} style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 8, padding: '8px 0', fontSize: 13, cursor: 'pointer' }}>Cancelar</button>
+              )}
+              <button onClick={guardar} disabled={guardando} style={{ flex: 2, background: C.coral, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
+                {guardando ? 'Guardando…' : editando ? 'Guardar cambios' : 'Agregar gasto'}
+              </button>
+            </div>
           </div>
           {items.map((it) => (
-            <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-              <span style={{ color: C.textDim, display: 'flex', alignItems: 'center', gap: 5 }}>{it.nombre}{it.anual && <RefreshCw size={9} color={C.gold} />}</span>
-              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
+              <span style={{ color: C.textDim, display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {it.nombre}{it.anual && <RefreshCw size={9} color={C.gold} />}
+              </span>
+              <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexShrink: 0 }}>
                 <span style={{ fontFamily: 'monospace' }}>{it.moneda === 'USD' ? 'US$' : '$'}{fmt(it.monto)}</span>
-                <button onClick={() => fin.borrar('egresos', it.id)} style={{ ...btnGhost, padding: 0 }}><Trash2 size={13} /></button>
+                <button onClick={() => abrirEdicion(it)} style={{ ...btnGhost, padding: 0 }} aria-label="Editar"><Pencil size={13} /></button>
+                <button onClick={() => fin.borrar('egresos', it.id)} style={{ ...btnGhost, padding: 0 }} aria-label="Borrar"><Trash2 size={13} /></button>
               </span>
             </div>
           ))}
@@ -739,22 +791,48 @@ function CategoriaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
   );
 }
 
+const TARJETA_VACIA = { nombre: '', cuota: '', moneda: 'ARS', cuotas: '1' };
+
 function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
-  const [form, setForm] = useState({ nombre: '', total: '', moneda: 'ARS', cuotas: 1 });
+  const [form, setForm] = useState(TARJETA_VACIA);
+  const [editando, setEditando] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [aviso, setAviso] = useState(null);
 
-  const add = async () => {
-    const monto = parseMonto(form.total);
-    const cuotas = Math.min(Math.max(parseInt(form.cuotas, 10) || 1, 1), 48);
+  const limpiar = () => { setForm(TARJETA_VACIA); setEditando(null); setAviso(null); };
+
+  const abrirEdicion = (g) => {
+    // En la base guardamos el total; en pantalla se trabaja con la cuota.
+    setForm({ nombre: g.nombre, cuota: String(g.total / g.cuotas), moneda: g.moneda, cuotas: String(g.cuotas) });
+    setEditando(g);
+    setAviso(null);
+  };
+
+  const cuotaNum = parseMonto(form.cuota);
+  const cuotasNum = Math.min(Math.max(parseInt(form.cuotas, 10) || 0, 0), 48);
+  const totalCalculado = Number.isFinite(cuotaNum) && cuotasNum > 0 ? cuotaNum * cuotasNum : null;
+
+  const guardar = async () => {
     if (!form.nombre.trim()) return setAviso('Poné un nombre.');
-    if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
+    if (!Number.isFinite(cuotaNum) || cuotaNum <= 0) return setAviso('El valor de la cuota no es válido.');
+    if (cuotasNum < 1) return setAviso('Poné al menos 1 cuota.');
     setAviso(null);
     setGuardando(true);
-    const ok = await fin.agregar('tarjeta', { nombre: form.nombre.trim(), total: monto, moneda: form.moneda, cuotas, desdeMes: mes, desdeAnio: anio });
+    // Vos cargás la cuota (que es lo que dice el resumen); guardamos el total.
+    const fila = {
+      nombre: form.nombre.trim(),
+      total: cuotaNum * cuotasNum,
+      moneda: form.moneda,
+      cuotas: cuotasNum,
+      desdeMes: editando ? editando.desdeMes : mes,
+      desdeAnio: editando ? editando.desdeAnio : anio,
+    };
+    const ok = editando ? await fin.editar('tarjeta', editando.id, fila) : await fin.agregar('tarjeta', fila);
     setGuardando(false);
-    if (ok) setForm({ nombre: '', total: '', moneda: 'ARS', cuotas: 1 });
+    if (ok) limpiar();
   };
+
+  const simbolo = form.moneda === 'USD' ? 'US$' : '$';
 
   return (
     <div style={card}>
@@ -767,10 +845,11 @@ function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
       </button>
       {open && (
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6, border: `1px solid ${editando ? C.goldBorder : 'transparent'}` }}>
+            {editando && <p style={{ fontSize: 11.5, color: C.gold, margin: 0, fontFamily: 'monospace' }}>Editando: {editando.nombre}</p>}
             <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder="Ej: Notebook, Viaje…" />
             <div style={{ display: 'flex', gap: 6 }}>
-              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.total} onChange={(e) => setForm((f) => ({ ...f, total: e.target.value }))} placeholder="Monto total" />
+              <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.cuota} onChange={(e) => setForm((f) => ({ ...f, cuota: e.target.value }))} placeholder="Valor de la cuota" />
               <div style={{ display: 'flex', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
                 {['ARS', 'USD'].map((m) => (
                   <button key={m} onClick={() => setForm((f) => ({ ...f, moneda: m }))} style={{ padding: '0 10px', fontSize: 11, fontFamily: 'monospace', border: 'none', background: form.moneda === m ? C.gold : 'transparent', color: form.moneda === m ? '#0B0F14' : C.textMute, cursor: 'pointer' }}>{m === 'ARS' ? '$' : 'US$'}</button>
@@ -780,17 +859,30 @@ function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
             <label style={{ display: 'flex', gap: 6, fontSize: 11, color: C.textDim, alignItems: 'center' }}>
               Cuotas <input type="text" inputMode="numeric" value={form.cuotas} onChange={(e) => setForm((f) => ({ ...f, cuotas: e.target.value.replace(/\D/g, '') }))} style={{ ...input, width: 50, padding: '4px 8px', fontFamily: 'monospace' }} />
             </label>
+            {totalCalculado !== null && (
+              <p style={{ fontSize: 11, color: C.textMute, margin: 0, fontFamily: 'monospace' }}>
+                {cuotasNum} × {simbolo}{fmt(cuotaNum)} = {simbolo}{fmt(totalCalculado)} en total
+              </p>
+            )}
             {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
-            <button onClick={add} disabled={guardando} style={{ background: C.gold, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
-              {guardando ? 'Guardando…' : 'Agregar gasto'}
-            </button>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {editando && (
+                <button onClick={limpiar} style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 8, padding: '8px 0', fontSize: 13, cursor: 'pointer' }}>Cancelar</button>
+              )}
+              <button onClick={guardar} disabled={guardando} style={{ flex: 2, background: C.gold, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
+                {guardando ? 'Guardando…' : editando ? 'Guardar cambios' : 'Agregar gasto'}
+              </button>
+            </div>
           </div>
           {items.map((it) => (
-            <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-              <span style={{ color: C.textDim }}>{it.nombre} <span style={{ fontSize: 11, color: C.textMute }}>cuota {it.nro}/{it.cuotas}</span></span>
-              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
+              <span style={{ color: C.textDim, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {it.nombre} <span style={{ fontSize: 11, color: C.textMute }}>cuota {it.nro}/{it.cuotas}</span>
+              </span>
+              <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexShrink: 0 }}>
                 <span style={{ fontFamily: 'monospace' }}>{it.moneda === 'USD' ? 'US$' : '$'}{fmt(it.cuota)}</span>
-                <button onClick={() => fin.borrar('tarjeta', it.id)} style={{ ...btnGhost, padding: 0 }}><Trash2 size={13} /></button>
+                <button onClick={() => abrirEdicion(it)} style={{ ...btnGhost, padding: 0 }} aria-label="Editar"><Pencil size={13} /></button>
+                <button onClick={() => fin.borrar('tarjeta', it.id)} style={{ ...btnGhost, padding: 0 }} aria-label="Borrar"><Trash2 size={13} /></button>
               </span>
             </div>
           ))}
@@ -801,48 +893,87 @@ function TarjetaCard({ cat, open, onToggle, items, total, mes, anio, fin }) {
 }
 
 function Ahorros({ fin, dolar }) {
+  const [verEn, setVerEn] = useState('ARS');
+
   const fisicos = fin.ahorros.filter((a) => a.clase === 'fisico');
   const plazos = fin.ahorros.filter((a) => a.clase === 'plazo');
   const billeteras = fin.ahorros.filter((a) => a.clase === 'billetera');
 
   const totalARS = fin.ahorros.reduce((a, r) => a + toARS(r.monto, r.moneda, dolar), 0);
+  const totalUSD = dolar > 0 ? totalARS / dolar : 0;
+
+  const guardar = (clase, v) => {
+    const fila = { clase, nombre: clase === 'fisico' ? null : v.nombre, monto: v.monto, moneda: clase === 'plazo' ? 'USD' : v.moneda };
+    return v.id ? fin.editar('ahorros', v.id, fila) : fin.agregar('ahorros', fila);
+  };
 
   return (
     <div>
       <div style={{ ...card, background: C.goldSoft, border: `1px solid ${C.goldBorder}`, marginBottom: 12 }}>
-        <p style={{ fontSize: 13, color: C.textDim, margin: '0 0 4px' }}>Ahorro total (en pesos)</p>
-        <p style={{ fontSize: 26, fontWeight: 600, color: C.gold, fontFamily: 'monospace', margin: 0 }}>${fmt(totalARS)}</p>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <p style={{ fontSize: 13, color: C.textDim, margin: 0 }}>Ahorro total</p>
+          <div style={{ display: 'flex', border: `1px solid ${C.goldBorder}`, borderRadius: 8, overflow: 'hidden', flexShrink: 0 }}>
+            {['ARS', 'USD'].map((m) => (
+              <button key={m} onClick={() => setVerEn(m)}
+                style={{ padding: '4px 10px', fontSize: 11, fontFamily: 'monospace', border: 'none', cursor: 'pointer',
+                  background: verEn === m ? C.gold : 'transparent', color: verEn === m ? '#0B0F14' : C.textMute,
+                  fontWeight: verEn === m ? 600 : 400 }}>
+                {m === 'ARS' ? '$' : 'US$'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <p style={{ fontSize: 26, fontWeight: 600, color: C.gold, fontFamily: 'monospace', margin: '4px 0 0' }}>
+          {verEn === 'ARS' ? `$${fmt(totalARS)}` : `US$${fmt(totalUSD)}`}
+        </p>
+
+        <p style={{ fontSize: 11, color: C.textMute, fontFamily: 'monospace', margin: '4px 0 0' }}>
+          {verEn === 'ARS' ? `US$${fmt(totalUSD)}` : `$${fmt(totalARS)}`} al dólar ${fmt(dolar)}
+        </p>
       </div>
 
       <Section title="Ahorros físicos" icon={Coins} items={fisicos}
         render={(it) => `${it.moneda === 'USD' ? 'US$' : '$'}${fmt(it.monto)}`}
         label={(it) => `Ahorro en ${it.moneda}`}
         fields={['monto', 'moneda']}
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'fisico', nombre: null, monto: v.monto, moneda: v.moneda })}
+        onGuardar={(v) => guardar('fisico', v)}
         onRemove={(id) => fin.borrar('ahorros', id)} />
 
       <Section title="Plazos fijos (USD)" icon={Landmark} items={plazos}
         render={(it) => `US$${fmt(it.monto)}`}
         label={(it) => it.nombre}
         fields={['nombre', 'monto']} nombreLabel="Banco"
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'plazo', nombre: v.nombre, monto: v.monto, moneda: 'USD' })}
+        onGuardar={(v) => guardar('plazo', v)}
         onRemove={(id) => fin.borrar('ahorros', id)} />
 
       <Section title="Billeteras digitales" icon={Wallet} items={billeteras}
         render={(it) => `${it.moneda === 'USD' ? 'US$' : '$'}${fmt(it.monto)}`}
         label={(it) => it.nombre}
         fields={['nombre', 'monto', 'moneda']} nombreLabel="Billetera"
-        onAdd={(v) => fin.agregar('ahorros', { clase: 'billetera', nombre: v.nombre, monto: v.monto, moneda: v.moneda })}
+        onGuardar={(v) => guardar('billetera', v)}
         onRemove={(id) => fin.borrar('ahorros', id)} />
     </div>
   );
 }
 
-function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, nombreLabel, label }) {
+const AHORRO_VACIO = { nombre: '', monto: '', moneda: 'ARS' };
+
+function Section({ title, icon: Icon, items, render, onGuardar, onRemove, fields, nombreLabel, label }) {
   const [show, setShow] = useState(false);
+  const [editando, setEditando] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [aviso, setAviso] = useState(null);
-  const [form, setForm] = useState({ nombre: '', monto: '', moneda: 'ARS' });
+  const [form, setForm] = useState(AHORRO_VACIO);
+
+  const cerrar = () => { setShow(false); setEditando(null); setAviso(null); setForm(AHORRO_VACIO); };
+
+  const abrirEdicion = (it) => {
+    setForm({ nombre: it.nombre || '', monto: String(it.monto), moneda: it.moneda });
+    setEditando(it);
+    setAviso(null);
+    setShow(true);
+  };
 
   const submit = async () => {
     const monto = parseMonto(form.monto);
@@ -850,19 +981,22 @@ function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, no
     if (!Number.isFinite(monto) || monto <= 0) return setAviso('El monto no es un número válido.');
     setAviso(null);
     setGuardando(true);
-    const ok = await onAdd({ ...form, nombre: form.nombre.trim(), monto });
+    const ok = await onGuardar({ ...form, nombre: form.nombre.trim(), monto, id: editando?.id });
     setGuardando(false);
-    if (ok) { setForm({ nombre: '', monto: '', moneda: 'ARS' }); setShow(false); }
+    if (ok) cerrar();
   };
 
   return (
     <div style={{ ...card, marginBottom: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, fontWeight: 500 }}><Icon size={15} color={C.textDim} />{title}</span>
-        <button onClick={() => setShow((s) => !s)} style={{ ...btnGhost, padding: 4 }}><Plus size={16} /></button>
+        <button onClick={() => (show ? cerrar() : setShow(true))} style={{ ...btnGhost, padding: 4 }} aria-label="Agregar">
+          <Plus size={16} style={{ transform: show ? 'rotate(45deg)' : 'none', transition: 'transform .2s' }} />
+        </button>
       </div>
       {show && (
-        <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+        <div style={{ background: '#10151C', borderRadius: 12, padding: 10, display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10, border: `1px solid ${editando ? C.mintBorder : 'transparent'}` }}>
+          {editando && <p style={{ fontSize: 11.5, color: C.mint, margin: 0, fontFamily: 'monospace' }}>Editando: {label(editando)}</p>}
           {fields.includes('nombre') && <input style={input} value={form.nombre} onChange={(e) => setForm((f) => ({ ...f, nombre: e.target.value }))} placeholder={nombreLabel || 'Nombre'} />}
           <div style={{ display: 'flex', gap: 6 }}>
             <input style={{ ...input, flex: 1, fontFamily: 'monospace' }} type="text" inputMode="decimal" value={form.monto} onChange={(e) => setForm((f) => ({ ...f, monto: e.target.value }))} placeholder="Monto" />
@@ -876,18 +1010,19 @@ function Section({ title, icon: Icon, items, render, onAdd, onRemove, fields, no
           </div>
           {aviso && <p style={{ fontSize: 11.5, color: C.coral, margin: 0 }}>{aviso}</p>}
           <button onClick={submit} disabled={guardando} style={{ background: C.mint, color: '#0B0F14', border: 'none', borderRadius: 8, padding: '8px 0', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: guardando ? 0.6 : 1 }}>
-            {guardando ? 'Guardando…' : 'Guardar'}
+            {guardando ? 'Guardando…' : editando ? 'Guardar cambios' : 'Guardar'}
           </button>
         </div>
       )}
       {items.length === 0 && <p style={{ color: C.textMute, fontSize: 12, textAlign: 'center', margin: '6px 0' }}>Sin registros todavía.</p>}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {items.map((it) => (
-          <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-            <span style={{ color: C.textDim }}>{label(it)}</span>
-            <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div key={it.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, alignItems: 'center' }}>
+            <span style={{ color: C.textDim, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label(it)}</span>
+            <span style={{ display: 'flex', gap: 7, alignItems: 'center', flexShrink: 0 }}>
               <span style={{ fontFamily: 'monospace' }}>{render(it)}</span>
-              <button onClick={() => onRemove(it.id)} style={{ ...btnGhost, padding: 0 }}><Trash2 size={13} /></button>
+              <button onClick={() => abrirEdicion(it)} style={{ ...btnGhost, padding: 0 }} aria-label="Editar"><Pencil size={13} /></button>
+              <button onClick={() => onRemove(it.id)} style={{ ...btnGhost, padding: 0 }} aria-label="Borrar"><Trash2 size={13} /></button>
             </span>
           </div>
         ))}
